@@ -6,6 +6,37 @@ A fast, native macOS screen-capture app modeled on the **Windows 11 Snipping Too
 
 It talks directly to Apple's frameworks through the [`objc2`](https://github.com/madsmtm/objc2) bindings — AppKit for the UI, ScreenCaptureKit for capture and recording, Vision for OCR, AVFoundation/AVKit for video and ImageIO for encoding. There is no web view and no runtime, and the app bundle is about 1.3 MB.
 
+**[Download Snipping.dmg](https://github.com/nomadslayer/mac-snipping/releases/latest/download/Snipping.dmg)** · macOS 15 or later · Apple silicon and Intel
+
+![The Snipping editor: a snip marked up with the pen, highlighter and an arrow, with the pen's color and size palette open](docs/screenshots/editor.png)
+
+*Mark up a snip with the pen, highlighter, shapes and more. Click the ▾ next to a tool for its colors and size.*
+
+## Screenshots
+
+**Capture bar.** Press ⌃⇧S and the screen freezes under a capture bar. Choose Rectangle, Window, Full screen or Freeform, or switch to screen recording, the text extractor or the color picker.
+
+![The capture bar over a frozen screen, with a window highlighted in Window mode](docs/screenshots/capture-bar.png)
+
+**Text actions.** Snipping finds the text in a snip. Copy it, or black out email addresses and phone numbers with Quick redact.
+
+![Text actions: the recognized text is outlined, and the email address and phone number are redacted](docs/screenshots/text-actions.png)
+
+<table>
+<tr>
+<td width="50%" valign="top">
+<b>After a shortcut snip.</b> The snip goes straight to the clipboard and a notification appears. Click it to open the editor, or right-click it for Copy, Save as… and Share….
+<br><br>
+<img src="docs/screenshots/notification.png" alt="Notification: Snip copied to clipboard, with a thumbnail of the snip">
+</td>
+<td width="50%" valign="top">
+<b>Settings.</b> Shortcuts, auto-copy and auto-save, border, notifications, recording defaults and theme.
+<br><br>
+<img src="docs/screenshots/settings.png" alt="The Settings window">
+</td>
+</tr>
+</table>
+
 ## Features
 
 | Windows Snipping Tool | Snipping for macOS |
@@ -17,15 +48,15 @@ It talks directly to Apple's frameworks through the [`objc2`](https://github.com
 | Recording preview with save / copy / share | ✅ Player window with Save as, Copy, Share, Show in Finder and **Export GIF** |
 | Text extractor | ✅ **⌃⇧T** — select an area and its text goes to the clipboard (Vision OCR) |
 | Color picker | ✅ Loupe that copies the hex value (sRGB) |
-| Toast "Snip copied to clipboard — select here to mark up" | ✅ Bottom-right notification with a thumbnail; click it to open the editor |
-| Ballpoint pen, Highlighter (colors + sizes) | ✅ Click a tool twice for its color palette and size slider |
+| Toast "Snip copied to clipboard — select here to mark up" | ✅ Bottom-right notification with a thumbnail; click it to open the editor, right-click it for Copy, Save as… and Share… |
+| Ballpoint pen, Highlighter (colors + sizes) | ✅ Click the ▾ next to a tool for its color palette and size slider; the icon shows the current color |
 | Eraser (stroke eraser) + "Erase all ink" | ✅ |
 | Ruler and Protractor (draw straight lines and arcs) | ✅ Drag to move, scroll or two-finger rotate to turn; strokes snap to the edge |
 | Shapes (rectangle, oval, line, arrow) with outline and fill | ✅ Select, move or resize with handles; ⇧ constrains; ⌫ deletes |
 | Image crop | ✅ Handles plus Apply/Cancel; Return and Esc work too |
 | Text actions: copy text, Quick redact emails and phone numbers | ✅ Select lines, Copy all text, Quick redact menu |
 | Undo / Redo, Zoom | ✅ ⌘Z / ⇧⌘Z, pinch, ⌘= / ⌘- / ⌘0 / ⌘9 |
-| Save as (PNG / JPG / GIF), Copy, Share, Print, Open with | ✅ Plus HEIC, TIFF and BMP; macOS share sheet; Print; Open with ▸ |
+| Save as (PNG / JPG / GIF), Copy, Share, Print, Open with | ✅ Plus HEIC, TIFF and BMP; macOS share sheet; Print; Open with ▸. Right-click a snip for Copy, Save as… and Share… |
 | Settings: auto-copy, auto-save screenshots and recordings, ask to save edits, multiple windows, add border (color and width), mic and system audio defaults, theme | ✅ Same settings, plus shortcut recorders, frame rate and Open at login |
 | Open an existing image to mark up | ✅ ⌘O, drag onto the Dock icon, or "Open With → Snipping" |
 
@@ -43,16 +74,18 @@ The app lives in the **menu bar**. Its Dock icon appears only while one of its w
 
 You can change them in **Settings**. The physical spot of Windows' `Win+Shift+S` on a Mac keyboard is ⌥⇧S, but since macOS 15 the system rejects global shortcuts that use only ⌥/⌥⇧, and ⌘⇧S would take over "Save As" in every app. That's why the defaults use ⌃.
 
-## Install on another Mac
+## Install
 
-`cargo xtask dmg` produces **`dist/Snipping.dmg`**, a universal app that runs natively on both Apple silicon and Intel and needs **macOS 15 Sequoia or later**.
+**[Download Snipping.dmg](https://github.com/nomadslayer/mac-snipping/releases/latest/download/Snipping.dmg)** from the [latest release](https://github.com/nomadslayer/mac-snipping/releases/latest). It's a universal app that runs natively on both Apple silicon and Intel and needs **macOS 15 Sequoia or later**.
 
-1. Copy `Snipping.dmg` to the other Mac. Open it and drag **Snipping** into **Applications**.
+1. Open `Snipping.dmg` and drag **Snipping** into **Applications**.
 2. The first time you open it, macOS blocks it because it isn't notarized by Apple. Go to **System Settings → Privacy & Security**, scroll down and click **Open Anyway** next to the Snipping message, then confirm.
    - In Terminal you can instead run `xattr -dr com.apple.quarantine /Applications/Snipping.app`.
 3. Take a snip (⌃⇧S) and allow **Screen & System Audio Recording** when asked, then reopen Snipping.
 
 Updates signed with the same local certificate keep that permission. For warning-free distribution to other people, sign with an Apple **Developer ID** certificate and notarize the app, which needs an Apple Developer Program membership.
+
+To build the installer yourself, run `cargo xtask dmg` (see below). It writes `dist/Snipping.dmg`.
 
 ## Build and run (Rust only)
 
@@ -93,15 +126,18 @@ If something goes wrong (for example a save fails), details are logged to `~/Lib
 ## Self-test
 
 ```sh
-cargo build && ./target/debug/snipping --selftest /tmp/snipping-selftest
+cargo build && SNIPPING_SETTINGS=/tmp/snipping-test.json ./target/debug/snipping --selftest /tmp/snipping-selftest
 ```
 
-The self-test runs 98 checks that don't need Screen Recording permission. They use synthetic "screenshots" and cover:
+`SNIPPING_SETTINGS` points the app at a scratch settings file, so the test doesn't change your real settings.
+
+The self-test runs 116 checks that don't need Screen Recording permission. They use synthetic "screenshots" and cover:
 
 - OCR and email/phone detection
 - encode/decode in all six image formats, and the clipboard
 - overlay selection math: rectangle, window, freeform and color picker
 - markup, undo/redo, crop and Quick redact
+- right-click menus, tool option popovers and the toolbar fitting at the minimum window width
 - the toast, Settings and global hotkey registration
 - every markup tool driven by real mouse and keyboard events
 - recorder start/stop/discard edge cases
@@ -109,6 +145,15 @@ The self-test runs 98 checks that don't need Screen Recording permission. They u
 - live captures of the app's own windows
 
 It also writes PNG renders of every UI surface to the output folder.
+
+### README screenshots
+
+```sh
+SNIPPING_SETTINGS=/tmp/snipping-shots.json ./target/debug/snipping --readme-shots docs/screenshots
+sips --resampleWidth 1800 docs/screenshots/{editor,text-actions,capture-bar}.png
+```
+
+This stages the editor, text actions, notification, Settings and capture bar with fictional demo content and captures each window. It resets the settings in the `SNIPPING_SETTINGS` file to defaults, so it won't run without one. The capture bar briefly covers the screen.
 
 ## Project layout
 

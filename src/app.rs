@@ -123,6 +123,11 @@ fn launched() {
         crate::selftest::run(PathBuf::from(out));
         return;
     }
+    if let Some(i) = args.iter().position(|a| a == "--readme-shots") {
+        let out = args.get(i + 1).cloned().unwrap_or_else(|| "docs/screenshots".into());
+        crate::selftest::readme_shots(PathBuf::from(out));
+        return;
+    }
     apply_theme();
     build_main_menu();
     build_status_item();

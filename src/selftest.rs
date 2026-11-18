@@ -31,6 +31,8 @@ struct Report {
 thread_local! {
     static REPORT: RefCell<Option<Report>> = const { RefCell::new(None) };
     static PENDING: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+    /// README screenshots: skip the extra background-thread save check.
+    static SHOTS_ONLY: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 /// Capture one of our own windows exactly as composited on screen (uses the
@@ -72,6 +74,9 @@ fn capture_own_window(window: Retained<NSWindow>, name: &'static str) {
                         let bg = out.with_extension("bg.png");
                         let img2 = img.clone();
                         util::on_main(move || {
+                            if SHOTS_ONLY.with(|s| s.get()) {
+                                return;
+                            }
                             // Bookkeeping lives on the main thread (thread-local counter).
                             hold();
                             util::background(move || {
@@ -234,7 +239,9 @@ fn finish() {
         passed.join("\n"),
         failed.join("\n")
     );
-    let _ = std::fs::write(out.join("report.txt"), &summary);
+    if !SHOTS_ONLY.with(|s| s.get()) {
+        let _ = std::fs::write(out.join("report.txt"), &summary);
+    }
     println!("\n==== {} passed, {} failed ====", passed.len(), failed.len());
     std::process::exit(if failed.is_empty() { 0 } else { 1 });
 }
@@ -565,6 +572,286 @@ fn test_live_editor() {
         if let Some(p) = crate::prefs::window() {
             capture_own_window(p, "42-live-settings.png");
         }
+    });
+}
+
+/// A tidy demo snip (fictional numbers) for the README screenshot.
+fn demo_snip() -> CFRetained<CGImage> {
+    let (w, h, scale) = (1600usize, 1000usize, 2.0);
+    let hpt = h as f64 / scale;
+    let ctx = bitmap_context(w, h, None).unwrap();
+    let gc = NSGraphicsContext::graphicsContextWithCGContext_flipped(&ctx, false);
+    NSGraphicsContext::saveGraphicsState_class();
+    NSGraphicsContext::setCurrentContext(Some(&gc));
+    let rgb = |hex: u32| {
+        let c = Rgba::hex(hex);
+        NSColor::colorWithSRGBRed_green_blue_alpha(c.r, c.g, c.b, 1.0)
+    };
+    // Layout is in points from the top-left; AppKit draws from the bottom-left.
+    let fill = |x: f64, top: f64, bw: f64, bh: f64, radius: f64, color: &NSColor| {
+        let r = rect(x * scale, (hpt - top - bh) * scale, bw * scale, bh * scale);
+        color.setFill();
+        NSBezierPath::bezierPathWithRoundedRect_xRadius_yRadius(r, radius * scale, radius * scale).fill();
+    };
+    let text = |s: &str, x: f64, top: f64, size: f64, color: &NSColor, bold: bool| {
+        let font = if bold { NSFont::boldSystemFontOfSize(size * scale) } else { NSFont::systemFontOfSize(size * scale) };
+        let keys: [&NSString; 2] = unsafe { [NSFontAttributeName, NSForegroundColorAttributeName] };
+        let vals: [&AnyObject; 2] = [&font, color];
+        let attrs = NSDictionary::from_slices(&keys, &vals);
+        let y = (hpt - top - size * 1.25) * scale;
+        unsafe { ns(s).drawAtPoint_withAttributes(NSPoint::new(x * scale, y), Some(&attrs)) };
+    };
+    fill(0.0, 0.0, 800.0, 500.0, 0.0, &rgb(0xEEF2F8));
+    fill(30.0, 30.0, 740.0, 440.0, 14.0, &rgb(0xFFFFFF));
+    let (ink, grey, line) = (rgb(0x1B1F27), rgb(0x6B7280), rgb(0xE5E9F0));
+    text("Weekly metrics", 56.0, 50.0, 22.0, &ink, true);
+    text("Last 7 days", 56.0, 80.0, 14.0, &grey, false);
+    text("Sign-ups", 56.0, 130.0, 14.0, &grey, false);
+    text("12,480", 56.0, 150.0, 44.0, &ink, true);
+    text("+18% vs last week", 56.0, 212.0, 16.0, &rgb(0x15803D), false);
+    text("Active users", 56.0, 272.0, 14.0, &grey, false);
+    text("48,920", 56.0, 292.0, 32.0, &ink, true);
+    text("Churn 2.1%", 56.0, 338.0, 16.0, &grey, false);
+    // Fictional contact details, for the Quick redact screenshot.
+    text("Questions? metrics@example.com · (555) 010-2048", 56.0, 436.0, 13.0, &grey, false);
+    // Bar chart: Saturday stands out.
+    for top in [180.0, 260.0, 340.0, 420.0] {
+        fill(370.0, top, 380.0, 1.0, 0.0, &line);
+    }
+    let heights = [120.0, 150.0, 135.0, 190.0, 170.0, 250.0, 205.0];
+    for (i, (bh, day)) in heights.iter().zip(["M", "T", "W", "T", "F", "S", "S"]).enumerate() {
+        let x = 384.0 + i as f64 * 52.0;
+        let color = if i == 5 { rgb(0xF7630C) } else { rgb(0x3B82F6) };
+        fill(x, 420.0 - bh, 34.0, *bh, 6.0, &color);
+        text(day, x + 12.0, 428.0, 12.0, &grey, false);
+    }
+    NSGraphicsContext::restoreGraphicsState_class();
+    CGBitmapContextCreateImage(Some(&ctx)).unwrap()
+}
+
+/// A desktop for the capture-bar screenshot: wallpaper with the demo snip as a window.
+fn demo_desktop(w: usize, h: usize, scale: f64) -> CFRetained<CGImage> {
+    let ctx = bitmap_context(w, h, None).unwrap();
+    let gc = NSGraphicsContext::graphicsContextWithCGContext_flipped(&ctx, false);
+    NSGraphicsContext::saveGraphicsState_class();
+    NSGraphicsContext::setCurrentContext(Some(&gc));
+    let c = |hex: u32| {
+        let c = Rgba::hex(hex);
+        NSColor::colorWithSRGBRed_green_blue_alpha(c.r, c.g, c.b, 1.0)
+    };
+    if let Some(g) = NSGradient::initWithStartingColor_endingColor(NSGradient::alloc(), &c(0x1E3A8A), &c(0x9333EA)) {
+        g.drawInRect_angle(rect(0.0, 0.0, w as f64, h as f64), 35.0);
+    }
+    NSGraphicsContext::restoreGraphicsState_class();
+    let card = demo_card_rect(w as f64 / scale, h as f64 / scale);
+    let r = rect(card.origin.x * scale, card.origin.y * scale, card.size.width * scale, card.size.height * scale);
+    CGContext::draw_image(Some(&ctx), r, Some(&demo_snip()));
+    CGBitmapContextCreateImage(Some(&ctx)).unwrap()
+}
+
+/// Where the demo window sits on a display of the given size (points, centered).
+fn demo_card_rect(w: f64, h: f64) -> NSRect {
+    rect((w - 800.0) / 2.0, (h - 500.0) / 2.0, 800.0, 500.0)
+}
+
+fn demo_frozen() -> Frozen {
+    let infos = capture::screens();
+    let displays = infos
+        .iter()
+        .map(|info| {
+            let w = (info.frame.size.width * info.scale) as usize;
+            let h = (info.frame.size.height * info.scale) as usize;
+            DisplayShot { info: *info, image: demo_desktop(w, h, info.scale) }
+        })
+        .collect();
+    let f = infos[0].frame;
+    let card = demo_card_rect(f.size.width, f.size.height);
+    let frame = rect(f.origin.x + card.origin.x, f.origin.y + card.origin.y, card.size.width, card.size.height);
+    Frozen { displays, windows: vec![WinInfo { id: 1, frame, owner: "Metrics".into(), title: "Weekly metrics".into() }] }
+}
+
+type Step = Box<dyn FnOnce(Box<dyn FnOnce()>)>;
+
+/// Run steps one after another; each calls `done` when its captures are queued.
+fn run_seq(mut steps: Vec<Step>) {
+    if steps.is_empty() {
+        finish();
+        return;
+    }
+    let step = steps.remove(0);
+    step(Box::new(move || when_idle(move || run_seq(steps))));
+}
+
+/// Call `f` once every pending window capture has been written.
+fn when_idle(f: impl FnOnce() + 'static) {
+    if PENDING.with(|p| p.get()) > 0 {
+        after(0.2, move || when_idle(f));
+    } else {
+        f();
+    }
+}
+
+fn wait_until(cond: impl Fn() -> bool + 'static, tries: u32, then: impl FnOnce() + 'static) {
+    if cond() || tries == 0 {
+        then();
+    } else {
+        after(0.2, move || wait_until(cond, tries - 1, then));
+    }
+}
+
+/// `snipping --readme-shots <dir>`: stage the app's windows with demo content
+/// and capture them for the README. Needs SNIPPING_SETTINGS (settings are reset).
+pub fn readme_shots(out: PathBuf) {
+    if std::env::var_os("SNIPPING_SETTINGS").is_none() {
+        eprintln!("--readme-shots resets settings: set SNIPPING_SETTINGS to a scratch file first.");
+        std::process::exit(2);
+    }
+    let _ = std::fs::create_dir_all(&out);
+    REPORT.with(|r| *r.borrow_mut() = Some(Report { out, passed: Vec::new(), failed: Vec::new() }));
+    SHOTS_ONLY.with(|s| s.set(true));
+    // Fresh-install settings, so paths and toggles look like a new user's.
+    crate::settings::update(|s| *s = crate::settings::Settings::default());
+    crate::app::ensure_regular();
+    crate::app::activate();
+    run_seq(vec![
+        Box::new(shot_editor),
+        Box::new(shot_text_actions),
+        Box::new(shot_notification),
+        Box::new(shot_settings),
+        Box::new(shot_capture_bar),
+    ]);
+}
+
+/// Make `w` the key window of the active app, so it is drawn active
+/// (colored window buttons, accent-colored switches).
+fn bring_to_front(w: &NSWindow) {
+    crate::app::ensure_regular();
+    crate::app::activate();
+    w.makeKeyAndOrderFront(None);
+    w.orderFrontRegardless();
+}
+
+fn demo_editor() -> Rc<Editor> {
+    let ed = Editor::new();
+    ed.load(demo_snip(), 2.0);
+    ed.window.setFrame_display(rect(80.0, 80.0, crate::editor::MIN_W, 820.0), true);
+    bring_to_front(&ed.window);
+    ed.zoom_fit();
+    ed
+}
+
+fn close_editor(ed: &Editor) {
+    ed.canvas.mark_saved();
+    ed.window.close();
+}
+
+/// Markup on a snip with the pen's color and size palette open.
+fn shot_editor(done: Box<dyn FnOnce()>) {
+    use crate::canvas::Tool;
+    let ed = demo_editor();
+    // Hand-drawn circle around the headline number (image pixels, top-left origin).
+    let circle: Vec<_> = (0..=64)
+        .map(|i| {
+            let t = -0.35 + i as f64 / 64.0 * (std::f64::consts::TAU + 0.6);
+            let wobble = 1.0 + 0.03 * (3.0 * t).sin();
+            pt(262.0 + 196.0 * wobble * t.cos(), 364.0 + 74.0 * wobble * t.sin())
+        })
+        .collect();
+    ed.canvas.push_item(Item::Ink { highlighter: false, color: Rgba::hex(0xE81123), width: 6.0, pts: circle });
+    ed.canvas.push_item(Item::Ink { highlighter: true, color: Rgba::hex(0xFFEB3B), width: 40.0, pts: vec![pt(106.0, 446.0), pt(396.0, 446.0)] });
+    ed.canvas.push_item(Item::Shape { kind: ShapeKind::Arrow, a: pt(1080.0, 200.0), b: pt(1268.0, 318.0), stroke: Rgba::hex(0xE81123), fill: None, width: 8.0 });
+    ed.canvas.update_style(|s| s.pen_color = Rgba::hex(0xE81123));
+    after(0.4, move || {
+        ed.tool_clicked(Tool::Pen);
+        ed.tool_options_clicked(Tool::Pen);
+        // Let the popover finish animating in.
+        after(1.2, move || {
+            capture_own_window(ed.window.clone(), "editor.png");
+            when_idle(move || {
+                close_editor(&ed);
+                done();
+            });
+        });
+    });
+}
+
+/// Text actions: recognized text with the contact details redacted.
+fn shot_text_actions(done: Box<dyn FnOnce()>) {
+    let ed = demo_editor();
+    ed.text_actions_clicked();
+    let probe = ed.clone();
+    wait_until(move || probe.canvas.st().ocr.is_some(), 50, move || {
+        ed.redact_all();
+        after(0.5, move || {
+            capture_own_window(ed.window.clone(), "text-actions.png");
+            when_idle(move || {
+                close_editor(&ed);
+                done();
+            });
+        });
+    });
+}
+
+/// The toast shown after a snip taken with the global shortcut.
+fn shot_notification(done: Box<dyn FnOnce()>) {
+    let img = demo_snip();
+    crate::toast::show(Some((&img, 2.0)), "Snip copied to clipboard", "Also saved to Screenshots. Select here to mark up and share.", None);
+    after(0.6, move || {
+        if let Some(w) = crate::toast::current_window() {
+            capture_own_window(Retained::into_super(w), "notification.png");
+        }
+        when_idle(move || {
+            crate::toast::hide_now();
+            done();
+        });
+    });
+}
+
+fn shot_settings(done: Box<dyn FnOnce()>) {
+    crate::prefs::open();
+    if let Some(w) = crate::prefs::window() {
+        bring_to_front(&w);
+    }
+    after(0.8, move || {
+        if let Some(w) = crate::prefs::window() {
+            capture_own_window(w, "settings.png");
+        }
+        when_idle(move || {
+            if let Some(w) = crate::prefs::window() {
+                w.close();
+            }
+            done();
+        });
+    });
+}
+
+/// The frozen-screen overlay with the capture bar, hovering a window in Window mode.
+/// (The bar hides during a rectangle drag, as on Windows, so a drag shot lacks it.)
+fn shot_capture_bar(done: Box<dyn FnOnce()>) {
+    let d0 = capture::screens()[0].frame;
+    overlay::show(overlay::Request {
+        purpose: Purpose::Snip,
+        mode: SnipMode::Window,
+        frozen: demo_frozen(),
+        show_bar: true,
+        done: Box::new(|_| {}),
+    });
+    let center = CGPoint::new(d0.origin.x + d0.size.width / 2.0, d0.origin.y + d0.size.height / 2.0);
+    overlay::simulate_move(0, center);
+    after(0.8, move || {
+        let app = NSApplication::sharedApplication(mtm());
+        let win = app.windows().iter().find(|w| {
+            let f = w.frame();
+            w.className().to_string().contains("OverlayWindow") && w.isVisible() && f.origin == d0.origin && f.size == d0.size
+        });
+        match win {
+            Some(w) => capture_own_window(w.retain(), "capture-bar.png"),
+            None => check("capture bar overlay found", false, ""),
+        }
+        when_idle(move || {
+            overlay::cancel();
+            done();
+        });
     });
 }
 

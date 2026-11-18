@@ -1066,14 +1066,19 @@ impl Editor {
         self.show_bottom(&bar);
     }
 
+    /// Quick redact ▸ Redact all: black out every email address and phone number.
+    pub(crate) fn redact_all(&self) {
+        let n = self.canvas.redact(true, true);
+        self.show_text_bar(Some(&format!("Redacted {n} item(s)")));
+    }
+
     fn show_redact_menu(&self) {
         let (emails, phones) = self.canvas.sensitive_count();
         let m = menu("Quick redact");
         let w = self.me();
         let all = menu_item(&format!("Redact all ({})", emails + phones), "", move || {
             if let Some(ed) = w.upgrade() {
-                let n = ed.canvas.redact(true, true);
-                ed.show_text_bar(Some(&format!("Redacted {n} item(s)")));
+                ed.redact_all();
             }
         });
         all.setEnabled(emails + phones > 0);
