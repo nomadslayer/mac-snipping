@@ -14,7 +14,10 @@ use crate::util::{after, hud_container, label, mtm, rect, secondary_label};
 struct Toast {
     window: Retained<NSPanel>,
     on_click: Option<Box<dyn Fn()>>,
+    menu: Option<Box<dyn Fn() -> Retained<NSMenu>>>,
 }
+
+const SHOW_SECS: f64 = 6.0;
 
 thread_local! {
     static CURRENT: RefCell<Option<Toast>> = const { RefCell::new(None) };
@@ -28,8 +31,16 @@ define_class!(
     pub struct ToastView;
 
     impl ToastView {
+        #[unsafe(method(rightMouseDown:))]
+        fn right_mouse_down(&self, e: &NSEvent) {
+            show_context_menu(self, e);
+        }
         #[unsafe(method(mouseDown:))]
-        fn mouse_down(&self, _e: &NSEvent) {
+        fn mouse_down(&self, e: &NSEvent) {
+            if e.modifierFlags().contains(NSEventModifierFlags::Control) {
+                show_context_menu(self, e);
+                return;
+            }
             let cb = CURRENT.with(|c| c.borrow_mut().as_mut().and_then(|t| t.on_click.take()));
             dismiss();
             if let Some(cb) = cb {
@@ -42,6 +53,45 @@ define_class!(
         }
     }
 );
+
+/// Give the current toast a right-click menu (built fresh each time it opens).
+pub fn set_menu(f: impl Fn() -> Retained<NSMenu> + 'static) {
+    CURRENT.with(|c| {
+        if let Some(t) = c.borrow_mut().as_mut() {
+            t.menu = Some(Box::new(f));
+        }
+    });
+}
+
+/// The current toast's right-click menu, if it has one.
+pub fn context_menu() -> Option<Retained<NSMenu>> {
+    CURRENT.with(|c| c.borrow().as_ref().and_then(|t| t.menu.as_ref().map(|f| f())))
+}
+
+fn show_context_menu(view: &NSView, e: &NSEvent) {
+    let Some(menu) = context_menu() else { return };
+    // Keep the toast up while the menu is open; the clock restarts once it closes.
+    let gen = next_generation();
+    NSMenu::popUpContextMenu_withEvent_forView(&menu, e, view);
+    if GENERATION.with(|g| g.get()) == gen {
+        schedule_dismiss(gen);
+    }
+}
+
+fn next_generation() -> u64 {
+    GENERATION.with(|g| {
+        g.set(g.get() + 1);
+        g.get()
+    })
+}
+
+fn schedule_dismiss(gen: u64) {
+    after(SHOW_SECS, move || {
+        if GENERATION.with(|g| g.get()) == gen {
+            dismiss();
+        }
+    });
+}
 
 pub fn dismiss() {
     if let Some(t) = CURRENT.with(|c| c.borrow_mut().take()) {
@@ -156,16 +206,9 @@ pub fn show(thumb: Option<(&CGImage, f64)>, title: &str, subtitle: &str, on_clic
     panel.setAlphaValue(1.0);
     panel.orderFrontRegardless();
 
-    let gen = GENERATION.with(|g| {
-        g.set(g.get() + 1);
-        g.get()
-    });
-    CURRENT.with(|c| *c.borrow_mut() = Some(Toast { window: panel, on_click }));
-    after(6.0, move || {
-        if GENERATION.with(|g| g.get()) == gen {
-            dismiss();
-        }
-    });
+    let gen = next_generation();
+    CURRENT.with(|c| *c.borrow_mut() = Some(Toast { window: panel, on_click, menu: None }));
+    schedule_dismiss(gen);
 }
 
 pub fn current_window() -> Option<Retained<NSPanel>> {

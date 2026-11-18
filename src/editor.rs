@@ -25,7 +25,8 @@ use crate::util::{
     toggle_button, vstack,
 };
 
-const MIN_W: f64 = 880.0;
+/// Wide enough that every toolbar group stays visible (none spill into »).
+pub(crate) const MIN_W: f64 = 1200.0;
 const MIN_H: f64 = 420.0;
 
 thread_local! {
@@ -157,6 +158,10 @@ pub struct Editor {
     tools_item: Retained<NSToolbarItem>,
     output_item: Retained<NSToolbarItem>,
     tool_buttons: Vec<(Tool, Retained<NSButton>)>,
+    /// The ▾ next to each tool that opens its color / size options.
+    tool_chevrons: Vec<(Tool, Retained<NSButton>)>,
+    /// Current-color stripes under the pen and highlighter icons.
+    color_bars: Vec<(Tool, Retained<NSView>)>,
     ruler_button: Retained<NSButton>,
     crop_button: Retained<NSButton>,
     text_button: Retained<NSButton>,
@@ -184,6 +189,25 @@ where
     T: std::ops::Deref,
 {
     unsafe { &*(&**v as *const T as *const NSView) }
+}
+
+/// A small stripe pinned under a tool icon, showing the tool's current color.
+fn color_bar(button: &NSButton) -> Retained<NSView> {
+    let bar = NSView::new(mtm());
+    bar.setWantsLayer(true);
+    bar.setTranslatesAutoresizingMaskIntoConstraints(false);
+    button.addSubview(&bar);
+    bar.widthAnchor().constraintEqualToConstant(16.0).setActive(true);
+    bar.heightAnchor().constraintEqualToConstant(3.0).setActive(true);
+    bar.centerXAnchor().constraintEqualToAnchor(&button.centerXAnchor()).setActive(true);
+    bar.bottomAnchor().constraintEqualToAnchor_constant(&button.bottomAnchor(), -2.0).setActive(true);
+    if let Some(l) = bar.layer() {
+        l.setCornerRadius(1.5);
+        // A hairline keeps black / white visible on either toolbar theme.
+        l.setBorderWidth(0.5);
+        l.setBorderColor(Some(&util::Rgba::new(0.5, 0.5, 0.5, 0.7).cg()));
+    }
+    bar
 }
 
 fn separator() -> Retained<NSBox> {
@@ -363,6 +387,30 @@ impl Editor {
                 (Tool::Eraser, mk_tool(Tool::Eraser, "eraser", "Eraser")),
                 (Tool::Shape, mk_tool(Tool::Shape, "square.on.circle", "Shapes")),
             ];
+            // A ▾ beside each tool opens its options (color, size, …).
+            let mk_chevron = |tool: Tool, tip: &str| {
+                let w = w.clone();
+                let b = icon_button("chevron.down", tip, move || {
+                    if let Some(ed) = w.upgrade() {
+                        ed.tool_options_clicked(tool);
+                    }
+                });
+                b.setImage(Some(&symbol("chevron.down", 9.0)));
+                b.setBordered(false);
+                fixed_size(&b, 14.0, 0.0);
+                b
+            };
+            let tool_chevrons = vec![
+                (Tool::Pen, mk_chevron(Tool::Pen, "Pen color and size")),
+                (Tool::Highlighter, mk_chevron(Tool::Highlighter, "Highlighter color and size")),
+                (Tool::Eraser, mk_chevron(Tool::Eraser, "Eraser options")),
+                (Tool::Shape, mk_chevron(Tool::Shape, "Shape, color and thickness")),
+            ];
+            let color_bars: Vec<(Tool, Retained<NSView>)> = tool_buttons
+                .iter()
+                .filter(|(t, _)| matches!(t, Tool::Pen | Tool::Highlighter))
+                .map(|(t, b)| (*t, color_bar(b)))
+                .collect();
             let ruler_button = {
                 let w = w.clone();
                 toggle_button("ruler", "Ruler / Protractor", move || {
@@ -456,7 +504,13 @@ impl Editor {
 
             // --- Toolbar items --------------------------------------------------
             let capture_stack = hstack(&[&segment, &new_button, &mode_popup, &delay_popup], 6.0);
-            let mut tool_views: Vec<&NSView> = tool_buttons.iter().map(|(_, b)| as_view(b)).collect();
+            // Each tool sits flush against its ▾.
+            let tool_groups: Vec<Retained<NSStackView>> = tool_buttons
+                .iter()
+                .zip(&tool_chevrons)
+                .map(|((_, b), (_, c))| hstack(&[as_view(b), as_view(c)], 0.0))
+                .collect();
+            let mut tool_views: Vec<&NSView> = tool_groups.iter().map(as_view).collect();
             tool_views.push(&ruler_button);
             tool_views.push(&crop_button);
             tool_views.push(&text_button);
@@ -531,6 +585,8 @@ impl Editor {
                 tools_item,
                 output_item,
                 tool_buttons,
+                tool_chevrons,
+                color_bars,
                 ruler_button,
                 crop_button,
                 text_button,
@@ -567,6 +623,15 @@ impl Editor {
                     ed.canvas_key(k);
                 }
             }));
+            let w = Rc::downgrade(&ed);
+            ed.canvas.ivars().hooks.borrow_mut().menu =
+                Some(Box::new(move |at| w.upgrade().and_then(|ed| ed.context_menu(at))));
+            let w = Rc::downgrade(&ed);
+            ed.canvas.ivars().hooks.borrow_mut().style = Some(Box::new(move || {
+                if let Some(ed) = w.upgrade() {
+                    ed.sync_tool_colors();
+                }
+            }));
         }
         // Keep the zoom label in sync with pinch-zoom.
         {
@@ -588,6 +653,7 @@ impl Editor {
         }
 
         ed.sync_capture_controls();
+        ed.sync_tool_colors();
         ed.show_empty(true);
         ed.window.center();
         EDITORS.with(|e| e.borrow_mut().push(ed.clone()));
@@ -659,8 +725,9 @@ impl Editor {
         let content = self.window.contentLayoutRect();
         let chrome_h = frame.size.height - content.size.height;
         let pad = 64.0;
-        let w = (size.width + pad).clamp(MIN_W, vis.size.width * 0.92);
-        let h = (size.height + pad + chrome_h).clamp(MIN_H + chrome_h, vis.size.height * 0.92);
+        // `max` first: f64::clamp panics if a small screen puts the cap under the minimum.
+        let w = (size.width + pad).min(vis.size.width * 0.92).max(MIN_W);
+        let h = (size.height + pad + chrome_h).min(vis.size.height * 0.92).max(MIN_H + chrome_h);
         // Keep the window's top-center where it is when visible; else center.
         let (x, y) = if self.window.isVisible() {
             let cx = frame.origin.x + frame.size.width / 2.0;
@@ -760,6 +827,43 @@ impl Editor {
         self.window.makeFirstResponder(Some(&self.canvas));
     }
 
+    /// The ▾ beside a tool: select the tool (if needed) and open its options.
+    pub(crate) fn tool_options_clicked(&self, tool: Tool) {
+        if self.canvas.tool() != tool {
+            self.tool_clicked(tool);
+        }
+        if self.canvas.tool() != tool {
+            return;
+        }
+        if let Some((_, b)) = self.tool_buttons.iter().find(|(t, _)| *t == tool) {
+            self.show_tool_options(tool, b);
+        }
+    }
+
+    /// Paint the pen / highlighter stripes with their current colors.
+    fn sync_tool_colors(&self) {
+        let style = self.canvas.style();
+        for (tool, bar) in &self.color_bars {
+            let c = if *tool == Tool::Highlighter { style.hl_color } else { style.pen_color };
+            if let Some(l) = bar.layer() {
+                l.setBackgroundColor(Some(&c.with_alpha(1.0).cg()));
+            }
+        }
+    }
+
+    /// Self-test helper: the options popover currently shown, if any.
+    pub(crate) fn shown_popover(&self) -> Option<Retained<NSPopover>> {
+        self.popover.borrow().clone().filter(|p| p.isShown())
+    }
+
+    /// Self-test helper: the color shown in a tool's stripe, as #RRGGBB.
+    pub(crate) fn color_bar_hex(&self, tool: Tool) -> Option<String> {
+        let (_, bar) = self.color_bars.iter().find(|(t, _)| *t == tool)?;
+        let cg = bar.layer()?.backgroundColor()?;
+        let color: Retained<NSColor> = NSColor::colorWithCGColor(&cg)?;
+        Some(util::Rgba::from_ns(&color).to_hex())
+    }
+
     fn show_tool_options(&self, tool: Tool, anchor: &NSButton) {
         let w = self.me();
         let pop = match tool {
@@ -776,9 +880,26 @@ impl Editor {
         if let Some(old) = self.popover.borrow_mut().take() {
             old.close();
         }
-        pop.showRelativeToRect_ofView_preferredEdge(anchor.bounds(), anchor, NSRectEdge::MaxY);
+        // A button tucked into the toolbar's overflow menu has no window, and
+        // AppKit throws if a popover points at it: fall back to the canvas.
+        if anchor.window().is_some() {
+            pop.showRelativeToRect_ofView_preferredEdge(anchor.bounds(), anchor, NSRectEdge::MaxY);
+        } else {
+            let (r, edge) = self.top_of_canvas();
+            pop.showRelativeToRect_ofView_preferredEdge(r, &self.scroll, edge);
+        }
         // Keep it alive while shown.
         *self.popover.borrow_mut() = Some(pop);
+    }
+
+    /// A point just inside the top-center of the canvas area, and the edge
+    /// that puts a popover below it.
+    fn top_of_canvas(&self) -> (NSRect, NSRectEdge) {
+        let b = self.scroll.bounds();
+        let flipped = self.scroll.isFlipped();
+        let y = if flipped { b.origin.y + 8.0 } else { b.origin.y + b.size.height - 8.0 };
+        let edge = if flipped { NSRectEdge::MaxY } else { NSRectEdge::MinY };
+        (rect(b.origin.x + b.size.width / 2.0, y, 1.0, 1.0), edge)
     }
 
     fn ruler_clicked(&self) {
@@ -818,7 +939,7 @@ impl Editor {
     }
 
     pub(crate) fn set_tools_enabled(&self, enabled: bool) {
-        for (_, b) in &self.tool_buttons {
+        for (_, b) in self.tool_buttons.iter().chain(&self.tool_chevrons) {
             b.setEnabled(enabled);
         }
         self.ruler_button.setEnabled(enabled);
@@ -1171,9 +1292,43 @@ impl Editor {
     }
 
     pub fn share(&self) {
-        if let Some(p) = self.temp_file() {
+        let Some(p) = self.temp_file() else { return };
+        if self.share_button.window().is_some() {
             export::share_file(&p, &self.share_button);
+        } else {
+            // The button is in the toolbar's overflow menu (no window to point at).
+            let (r, _) = self.top_of_canvas();
+            export::share_file_at(&p, &self.scroll, r);
         }
+    }
+
+    /// Share sheet pointing at a spot on the canvas (used by the right-click menu).
+    fn share_at(&self, at: NSPoint) {
+        if let Some(p) = self.temp_file() {
+            export::share_file_at(&p, &self.canvas, rect(at.x, at.y, 1.0, 1.0));
+        }
+    }
+
+    /// Right-click / control-click menu on the snip. `at` is in canvas coordinates.
+    pub fn context_menu(&self, at: NSPoint) -> Option<Retained<NSMenu>> {
+        if !self.has_image() {
+            return None;
+        }
+        let m = menu("Snip");
+        let copy_title = if self.canvas.ocr_text(true).is_some() { "Copy text" } else { "Copy" };
+        let w = self.me();
+        m.addItem(&menu_item(copy_title, "c", move || if let Some(e) = w.upgrade() { e.copy() }));
+        let w = self.me();
+        m.addItem(&menu_item("Save as…", "s", move || if let Some(e) = w.upgrade() { e.save_as() }));
+        let w = self.me();
+        m.addItem(&menu_item("Share…", "", move || if let Some(e) = w.upgrade() { e.share_at(at) }));
+        m.addItem(&NSMenuItem::separatorItem(mtm()));
+        let w = self.me();
+        m.addItem(&menu_item("Print…", "p", move || if let Some(e) = w.upgrade() { e.print() }));
+        if let Some(p) = self.saved_path.borrow().clone() {
+            m.addItem(&menu_item("Show in Finder", "", move || export::reveal_in_finder(&p)));
+        }
+        Some(m)
     }
 
     pub fn print(&self) {

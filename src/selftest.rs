@@ -192,6 +192,8 @@ pub fn run(out: PathBuf) {
         Box::new(test_overlay),
         Box::new(test_editor),
         Box::new(test_canvas_interactions),
+        Box::new(test_context_menus),
+        Box::new(test_tool_options),
         Box::new(test_deliver_snip),
         Box::new(test_review_regressions),
         Box::new(test_recorder_states),
@@ -668,6 +670,120 @@ fn send_key(canvas: &crate::canvas::CanvasView, code: u16, chars: &str) {
     canvas.keyDown(&ev);
 }
 
+fn menu_titles(m: &NSMenu) -> Vec<String> {
+    m.itemArray().iter().filter(|i| !i.isSeparatorItem()).map(|i| i.title().to_string()).collect()
+}
+
+fn right_click_menu(canvas: &crate::canvas::CanvasView, px: CGPoint) -> Option<Retained<NSMenu>> {
+    let scale = canvas.scale();
+    let win = canvas.window().expect("canvas in window");
+    let loc = canvas.convertPoint_toView(NSPoint::new(px.x / scale, px.y / scale), None);
+    let ev = NSEvent::mouseEventWithType_location_modifierFlags_timestamp_windowNumber_context_eventNumber_clickCount_pressure(
+        NSEventType::RightMouseDown, loc, NSEventModifierFlags::empty(), 0.0, win.windowNumber(), None, 0, 1, 1.0,
+    )
+    .expect("mouse event");
+    // Goes through Objective-C dispatch, i.e. what AppKit calls on a right-click.
+    canvas.menuForEvent(&ev)
+}
+
+fn test_context_menus() {
+    let img = synthetic_screenshot(1200, 700, 2.0);
+    let ed = Editor::new();
+    ed.load(img, 2.0);
+    ed.set_saved_path(Some(out_dir().join("context-menu.png")));
+    ed.window.setFrame_display(rect(0.0, 0.0, 1000.0, 700.0), true);
+    ed.zoom_actual();
+    let menu = right_click_menu(&ed.canvas, pt(300.0, 300.0));
+    let titles = menu.as_deref().map(menu_titles).unwrap_or_default();
+    check(
+        "right-click on snip shows Copy/Save as/Share",
+        titles.starts_with(&["Copy".into(), "Save as…".into(), "Share…".into()]) && titles.iter().any(|t| t == "Show in Finder"),
+        &format!("{titles:?}"),
+    );
+    if let Some(menu) = menu {
+        let pb = NSPasteboard::generalPasteboard();
+        pb.clearContents();
+        menu.performActionForItemAtIndex(0);
+        let has_png = unsafe { pb.dataForType(NSPasteboardTypePNG) }.map(|d| d.length() > 0).unwrap_or(false);
+        check("right-click Copy puts the snip on the clipboard", has_png, "");
+    }
+    let empty = Editor::new();
+    empty.window.setFrame_display(rect(0.0, 0.0, 900.0, 520.0), true);
+    check("no right-click menu without a snip", right_click_menu(&empty.canvas, pt(10.0, 10.0)).is_none(), "");
+    ed.canvas.mark_saved();
+    ed.window.close();
+    empty.window.close();
+}
+
+fn has_slider(v: &NSView) -> bool {
+    v.subviews().iter().any(|s| {
+        let any: &AnyObject = &s;
+        any.downcast_ref::<NSSlider>().is_some() || has_slider(&s)
+    })
+}
+
+/// The ▾ beside the pen / highlighter opens color + size, and the stripe follows the color.
+fn test_tool_options() {
+    use crate::canvas::Tool;
+    let img = synthetic_screenshot(1600, 1000, 2.0);
+    let ed = Editor::new();
+    ed.load(img, 2.0);
+    // Narrowest the window can be: every toolbar group must still fit.
+    ed.window.setFrame_display(rect(60.0, 60.0, crate::editor::MIN_W, 640.0), true);
+    ed.window.orderFrontRegardless();
+    ed.tool_options_clicked(Tool::Highlighter);
+    let selected = ed.canvas.tool() == Tool::Highlighter;
+    hold();
+    after(0.5, move || {
+        let ids: Vec<String> = ed
+            .window
+            .toolbar()
+            .and_then(|t| t.visibleItems())
+            .map(|a| a.iter().map(|i| i.itemIdentifier().to_string()).collect())
+            .unwrap_or_default();
+        let all = ["capture", "tools", "output", "more"].iter().all(|w| ids.iter().any(|i| i == w));
+        check("whole toolbar fits at minimum window width", all, &format!("{ids:?}"));
+        check("▾ selects the highlighter", selected, "");
+        let pop = ed.shown_popover();
+        check("▾ opens highlighter color and size", pop.is_some(), "");
+        if let Some(v) = pop.and_then(|p| p.contentViewController()).map(|vc| vc.view()) {
+            render_view(&v, "27-highlighter-options.png");
+            check("highlighter options include a size slider", has_slider(&v), "");
+        }
+        ed.tool_options_clicked(Tool::Pen);
+        let ok = ed.canvas.tool() == Tool::Pen && ed.shown_popover().is_some();
+        check("▾ switches to the pen and opens its options", ok, "");
+        if let Some(v) = ed.shown_popover().and_then(|p| p.contentViewController()).map(|vc| vc.view()) {
+            render_view(&v, "28-pen-options.png");
+        }
+        ed.canvas.update_style(|s| {
+            s.pen_color = Rgba::hex(0x0078D4);
+            s.hl_color = Rgba::hex(0x7CFC00);
+        });
+        let pen = ed.color_bar_hex(Tool::Pen);
+        let hl = ed.color_bar_hex(Tool::Highlighter);
+        check(
+            "tool stripes follow the chosen colors",
+            pen.as_deref() == Some("#0078D4") && hl.as_deref() == Some("#7CFC00"),
+            &format!("pen {pen:?}, highlighter {hl:?}"),
+        );
+        capture_own_window(ed.window.clone(), "29-toolbar-tool-options.png");
+        after(1.5, move || {
+            // Squeezed below the minimum, the tools spill into the toolbar's »
+            // menu: options and Share must still open (they used to throw).
+            ed.window.setFrame_display(rect(60.0, 60.0, 640.0, 520.0), true);
+            ed.window.layoutIfNeeded();
+            ed.tool_options_clicked(Tool::Shape);
+            check("tool options open even when the toolbar overflows", ed.shown_popover().is_some(), "");
+            ed.share();
+            check("share survives an overflowed toolbar", true, "");
+            ed.canvas.mark_saved();
+            ed.window.close();
+            release();
+        });
+    });
+}
+
 fn test_canvas_interactions() {
     use crate::canvas::Tool;
     let none = NSEventModifierFlags::empty();
@@ -822,6 +938,9 @@ fn test_deliver_snip() {
     let img = synthetic_screenshot(1200, 700, 2.0);
     crate::app::deliver_snip(img, 2.0, crate::app::Origin::Menu);
     check("toast shown after hotkey-style snip", crate::toast::current_window().map(|w| w.isVisible()).unwrap_or(false), "");
+    let titles = crate::toast::context_menu().map(|m| menu_titles(&m)).unwrap_or_default();
+    let ok = ["Copy", "Save as…", "Share…", "Open in editor", "Show in Finder"].iter().all(|t| titles.iter().any(|x| x == t));
+    check("toast right-click menu has copy/save/share", ok, &format!("{titles:?}"));
     hold();
     after(1.5, move || {
         let files: Vec<_> = std::fs::read_dir(&dir).map(|r| r.flatten().map(|e| e.path()).collect()).unwrap_or_default();

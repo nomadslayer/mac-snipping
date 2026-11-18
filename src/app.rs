@@ -887,16 +887,55 @@ pub fn deliver_snip(image: CFRetained<CGImage>, scale: f64, origin: Origin) {
                 _ => "Select here to mark up and share.",
             };
             let img2 = image.clone();
+            let saved2 = saved.clone();
             toast::show(
                 Some((&image, scale)),
                 title,
                 subtitle,
                 Some(Box::new(move || {
-                    editor::open_image(img2.clone(), scale, saved.clone());
+                    editor::open_image(img2.clone(), scale, saved2.clone());
                 })),
             );
+            toast::set_menu(move || snip_toast_menu(&image, scale, &saved));
         }
     }
+}
+
+/// Right-click menu on the "Snip copied" toast. Save as and Share open the
+/// snip in the editor first, so the sheet has a window to attach to.
+fn snip_toast_menu(image: &CFRetained<CGImage>, scale: f64, saved: &Option<PathBuf>) -> Retained<NSMenu> {
+    let m = menu("Snip");
+    let in_editor = |then: fn(&Editor)| {
+        let (img, saved) = (image.clone(), saved.clone());
+        move || {
+            toast::hide_now();
+            let ed = editor::open_image(img.clone(), scale, saved.clone());
+            let w = std::rc::Rc::downgrade(&ed);
+            // Let the window lay out first: Share anchors to its toolbar button.
+            after(0.05, move || {
+                if let Some(ed) = w.upgrade() {
+                    ed.window.layoutIfNeeded();
+                    then(&ed);
+                }
+            });
+        }
+    };
+    let img = image.clone();
+    m.addItem(&menu_item("Copy", "", move || {
+        export::copy_image(&img);
+        toast::dismiss();
+    }));
+    m.addItem(&menu_item("Save as…", "", in_editor(|ed| ed.save_as())));
+    m.addItem(&menu_item("Share…", "", in_editor(|ed| ed.share())));
+    m.addItem(&NSMenuItem::separatorItem(mtm()));
+    m.addItem(&menu_item("Open in editor", "", in_editor(|_| {})));
+    if let Some(p) = saved.clone() {
+        m.addItem(&menu_item("Show in Finder", "", move || {
+            toast::dismiss();
+            export::reveal_in_finder(&p);
+        }));
+    }
+    m
 }
 
 pub fn start_record(origin: Origin) {

@@ -312,10 +312,15 @@ pub fn print_image(img: &CGImage, scale: f64, window: Option<&NSWindow>) {
 
 /// Show the macOS share sheet for a file.
 pub fn share_file(path: &Path, anchor: &NSView) {
+    share_file_at(path, anchor, anchor.bounds());
+}
+
+/// Show the macOS share sheet for a file, pointing at `at` (in `view`'s coordinates).
+pub fn share_file_at(path: &Path, view: &NSView, at: NSRect) {
     let url = file_url(path);
     let items: Retained<NSArray> = NSArray::from_retained_slice(&[Retained::into_super(Retained::into_super(url))]);
     let picker = unsafe { NSSharingServicePicker::initWithItems(NSSharingServicePicker::alloc(), &items) };
-    picker.showRelativeToRect_ofView_preferredEdge(anchor.bounds(), anchor, NSRectEdge::MinY);
+    picker.showRelativeToRect_ofView_preferredEdge(at, view, NSRectEdge::MinY);
 }
 
 pub struct AppChoice {

@@ -238,6 +238,10 @@ pub enum CanvasKey {
 pub struct Hooks {
     pub changed: Option<Box<dyn Fn()>>,
     pub key: Option<Box<dyn Fn(CanvasKey)>>,
+    /// Builds the right-click menu; gets the click point in view coordinates.
+    pub menu: Option<Box<dyn Fn(NSPoint) -> Option<Retained<NSMenu>>>>,
+    /// The tool style (color, size, …) changed.
+    pub style: Option<Box<dyn Fn()>>,
 }
 
 pub struct CanvasIvars {
@@ -276,7 +280,19 @@ define_class!(
 
         #[unsafe(method(mouseDown:))]
         fn mouse_down(&self, event: &NSEvent) {
+            // Control-click is a right-click on macOS: show the menu, don't draw.
+            if event.modifierFlags().contains(NSEventModifierFlags::Control) {
+                if let Some(menu) = self.context_menu(event) {
+                    NSMenu::popUpContextMenu_withEvent_forView(&menu, event, self);
+                }
+                return;
+            }
             self.on_mouse_down(event);
+        }
+
+        #[unsafe(method_id(menuForEvent:))]
+        fn menu_for_event(&self, event: &NSEvent) -> Option<Retained<NSMenu>> {
+            self.context_menu(event)
         }
 
         #[unsafe(method(mouseDragged:))]
@@ -397,6 +413,13 @@ impl CanvasView {
 
     pub fn st(&self) -> std::cell::Ref<'_, CanvasState> {
         self.ivars().state.borrow()
+    }
+
+    /// The right-click menu for `event`, as built by the owner's `menu` hook.
+    pub fn context_menu(&self, event: &NSEvent) -> Option<Retained<NSMenu>> {
+        let p = self.convertPoint_fromView(event.locationInWindow(), None);
+        let hooks = self.ivars().hooks.borrow();
+        hooks.menu.as_ref().and_then(|f| f(p))
     }
 
     fn st_mut(&self) -> std::cell::RefMut<'_, CanvasState> {
@@ -544,6 +567,9 @@ impl CanvasView {
             }
         };
         self.setNeedsDisplay(true);
+        if let Some(f) = self.ivars().hooks.borrow().style.as_ref() {
+            f();
+        }
         if changed_shape {
             self.notify();
         }
